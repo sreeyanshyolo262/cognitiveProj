@@ -68,6 +68,74 @@ def reset_robot():
     robot_state.update({"x": 0.0, "y": 0.0, "heading_deg": 0.0, "battery": 100})
 
 
+HIGH_LEVEL = {"return_to_start", "draw_polygon", "run_plan"}
+MAX_ACTIONS = 24  # cap on how many steps one spoken command may expand to
+MAX_ROUNDS = 26   # cap on LLM <-> tool round trips per command
+
+
+def _signed_turn(delta: float) -> list:
+    """Shortest turn for a heading change of `delta` degrees (+ = right)."""
+    delta = ((delta + 180.0) % 360.0) - 180.0
+    if abs(delta) < MIN_TURN_DEG:
+        return []
+    return [("turn", {"direction": "right" if delta > 0 else "left", "degrees": abs(delta)})]
+
+
+def plan_polygon(args: dict) -> list:
+    """Exact move/turn steps for a regular polygon (n sides, side length)."""
+    try:
+        n = int(args.get("sides", 4))
+    except (TypeError, ValueError):
+        n = 4
+    n = max(3, min(n, 12))
+    try:
+        side = float(args.get("side_length_m", 0.5))
+    except (TypeError, ValueError):
+        side = 0.5
+    side = max(MIN_DISTANCE_M, min(abs(side), MAX_DISTANCE_M))
+    direction = "left" if args.get("direction") == "left" else "right"
+    steps = []
+    for _ in range(n):
+        steps.append(("move", {"direction": "forward", "distance_m": side}))
+        steps.append(("turn", {"direction": direction, "degrees": 360.0 / n}))
+    return steps
+
+
+def expand_tool(name: str, args: dict) -> list:
+    """Turn a high-level tool call into the primitive steps that carry it out."""
+    if name == "return_to_start":
+        return plan_return_to_start()
+    if name == "draw_polygon":
+        return plan_polygon(args)
+    if name == "run_plan":
+        steps = []
+        for entry in args.get("steps") or []:
+            if isinstance(entry, dict) and entry.get("action"):
+                steps.append((entry["action"], {k: v for k, v in entry.items() if k != "action"}))
+        return steps
+    return [(name, args)]
+
+
+def plan_return_to_start() -> list:
+    """Steps that take the robot from its tracked pose back to the origin and
+    leave it facing its original heading (0 deg): turn toward the origin, drive
+    there, turn back to the original heading."""
+    x, y, h = robot_state["x"], robot_state["y"], robot_state["heading_deg"]
+    dist = math.hypot(x, y)
+    if dist < MIN_DISTANCE_M:
+        return _signed_turn(-h)
+
+    target = math.degrees(math.atan2(-y, -x))  # direction from robot to origin
+    steps = _signed_turn(target - h)
+    remaining = dist
+    while remaining > 1e-6:
+        step = min(remaining, MAX_DISTANCE_M)
+        steps.append(("move", {"direction": "forward", "distance_m": step}))
+        remaining -= step
+    steps += _signed_turn(0.0 - target)
+    return steps
+
+
 # ---------------------------------------------------------------------------
 # Tool ("function") definitions given to the LLM
 # ---------------------------------------------------------------------------
@@ -139,6 +207,84 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_plan",
+            "description": (
+                "Run an ordered list of steps in ONE call. Use this whenever the "
+                "user's instruction has two or more steps (e.g. 'go straight, "
+                "then left, then back'). Steps run in the given order."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["move", "turn", "return_to_start"],
+                                },
+                                "direction": {
+                                    "type": "string",
+                                    "enum": ["forward", "backward", "left", "right"],
+                                    "description": "forward/backward for move, left/right for turn.",
+                                },
+                                "distance_m": {"type": "number"},
+                                "degrees": {"type": "number"},
+                            },
+                            "required": ["action"],
+                        },
+                    }
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draw_polygon",
+            "description": (
+                "Drive a regular polygon path and finish where it started, "
+                "facing the original way: square (sides=4), triangle (3), "
+                "pentagon (5), hexagon (6). For a circle use sides=12 with a "
+                "small side length. The server generates every step exactly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sides": {"type": "integer", "description": "Number of sides, 3 to 12."},
+                    "side_length_m": {
+                        "type": "number",
+                        "description": "Length of each side in metres (default 0.5).",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["right", "left"],
+                        "description": "Which way to turn at each corner (default right).",
+                    },
+                },
+                "required": ["sides"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "return_to_start",
+            "description": (
+                "Drive the robot back to the place it started (its origin) and "
+                "face its original direction. Use for 'come back', 'come back "
+                "to me', 'return', 'go home', 'go back to the start' when no "
+                "distance is given. The server works out the route itself."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 SYSTEM_PROMPT = f"""You are the cognitive control layer for a simulated mobile robot.
@@ -155,9 +301,21 @@ Rules:
   it into multiple move()/turn() calls, or clamp to the limit.
 - If the instruction is ambiguous (e.g. "go" with no direction or distance),
   make a reasonable default choice: forward, 1 metre, or a 90 degree turn.
-- "back", "backward(s)", "reverse", "go back", "come back" and "move back"
-  mean move(direction="backward"). Do NOT turn first. Only call turn() when
-  the user explicitly says turn, rotate, spin, left, right, or "turn around".
+- "back", "backward(s)", "reverse", "back up" and "go back <distance>" mean
+  move(direction="backward"). Do NOT turn first. Only call turn() when the
+  user explicitly says turn, rotate, spin, left, right, or "turn around".
+- "come back", "come back to me", "return", "go home", "go back to the start"
+  with NO distance mean return_to_start(). The server tracks where the robot
+  has been and computes the route, so do not try to reverse moves yourself.
+- Shapes: use draw_polygon() for square (sides=4), triangle (3), pentagon (5),
+  hexagon (6) and circle (sides=12, small side). Default side is 0.5 metres
+  if the user gives none. Never build these out of separate move/turn calls.
+  A rectangle or other irregular path: use individual move()/turn() calls.
+- For ANY instruction with two or more steps, call run_plan() ONCE with all
+  the steps in the order the user said them ("go straight then left then
+  back" = steps: move forward, turn left, move backward). "Come back" inside
+  a plan is {{"action": "return_to_start"}}. Single steps can be a plain move()
+  or turn().
 - Never add turns the user did not ask for.
 - If the user asks to stop or cancel, call stop().
 - You may call more than one tool in a single response for compound
@@ -449,43 +607,117 @@ def command(req: CommandRequest):
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Empty command text.")
 
-    try:
-        completion = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": req.text},
-            ],
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.3,
-            max_completion_tokens=1024,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Groq LLM error: {exc}") from exc
-
-    message = completion.choices[0].message
-    tool_calls = message.tool_calls or []
-
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": req.text},
+    ]
     actions = []
-    for call in tool_calls:
-        name = call.function.name
+    reply_text = ""
+    halted = False
+
+    # Agent loop: the model proposes tool calls, we execute them and feed each
+    # result back so it can decide the next step, until it stops calling tools.
+    for _ in range(MAX_ROUNDS):
         try:
-            args = json.loads(call.function.arguments or "{}")
-        except json.JSONDecodeError:
-            args = {}
-        try:
-            actions.append(execute_tool(name, args))
-        except ValueError:
-            continue
-        # hardware refused / link down: don't run the rest of the plan blind
-        reply = actions[-1].get("robot_reply", "")
-        if reply.startswith(("BLOCKED", "LINK_ERROR", "TIMEOUT", "STOPPED")):
+            completion = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.3,
+                max_completion_tokens=2048,
+                parallel_tool_calls=True,
+                extra_body={"reasoning_effort": "low"},
+            )
+        except Exception as exc:
+            if actions:  # something already ran; report that, not an error
+                break
+            raise HTTPException(status_code=502, detail=f"Groq LLM error: {exc}") from exc
+
+        message = completion.choices[0].message
+        reply_text = message.content or reply_text
+        tool_calls = message.tool_calls or []
+        if not tool_calls:
             break
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": c.id,
+                        "type": "function",
+                        "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"},
+                    }
+                    for c in tool_calls
+                ],
+            }
+        )
+
+        for call in tool_calls:
+            try:
+                args = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            name = call.function.name
+
+            if halted or len(actions) >= MAX_ACTIONS:
+                result = {"error": "not executed: the robot was halted or the step limit was reached"}
+            else:
+                # high-level tools (return_to_start, draw_polygon) expand into
+                # several move/turn steps
+                steps = [(name, args)]
+                results = []
+                while steps:
+                    step_name, step_args = steps.pop(0)
+                    if step_name in HIGH_LEVEL:
+                        # expanded lazily so return_to_start sees the pose
+                        # reached by the steps before it
+                        steps[0:0] = expand_tool(step_name, step_args)
+                        continue
+                    if len(actions) >= MAX_ACTIONS:
+                        break
+                    try:
+                        action = execute_tool(step_name, step_args)
+                    except ValueError as exc:
+                        results.append({"error": str(exc)})
+                        continue
+                    actions.append(action)
+                    results.append(action)
+                    # hardware refused / link down: don't run the rest blind
+                    if action.get("robot_reply", "").startswith(
+                        ("BLOCKED", "LINK_ERROR", "TIMEOUT", "STOPPED")
+                    ):
+                        halted = True
+                        break
+                if len(results) == 1:
+                    result = results[0]
+                else:
+                    result = {"steps_executed": len(results), "final_pose": dict(robot_state)}
+                    if halted:
+                        result["halted"] = results[-1].get("robot_reply")
+
+            messages.append(
+                {"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)}
+            )
+
+        if halted or len(actions) >= MAX_ACTIONS:
+            break
+        # a self-contained plan has been fully executed: no need for another
+        # (slow, rate-limited) LLM round just to word a reply
+        if any(c.function.name in HIGH_LEVEL | {"stop"} for c in tool_calls):
+            break
+
+    if not reply_text:
+        if halted and actions:
+            reply_text = f"Stopped: {actions[-1].get('robot_reply')}"
+        elif actions:
+            reply_text = f"Done - {len(actions)} step{'s' if len(actions) != 1 else ''}."
 
     return {
         "heard": req.text,
-        "reply": message.content or "",
+        "reply": reply_text,
         "actions": actions,
         "state": robot_state,
     }
