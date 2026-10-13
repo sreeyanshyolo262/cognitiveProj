@@ -1,104 +1,235 @@
-# Voice → Robot (simulated)
+# Cognibot — talk to a robot car in plain English
 
-A minimal version of your cognitive-robotics pipeline that runs entirely on
-Windows with no ROS 2 / Gazebo:
+Speak or type a command like *"go forward half a metre, then turn left"*. A
+large language model turns it into a short list of safe robot actions, and an
+Arduino car carries them out.
 
 ```
-Mic → browser recording → Groq Whisper (speech-to-text)
-    → Groq LLM with tool calling (move / turn / stop)
-    → in-memory "robot" pose → animated on a <canvas> in the browser
+Phone / desktop app  ──►  FastAPI server (laptop)  ──►  Groq Whisper (speech → text)
+   (Tauri, mic + text)         │                    ──►  Groq LLM (picks tools: move/turn/stop)
+                               │  safety layer clamps every value
+                               └── Bluetooth (BLE) ──►  Arduino car (motors + ultrasonic stop)
 ```
 
-The LLM never moves the robot directly — it can only call `move()`, `turn()`,
-`stop()`, `get_position()`, `get_battery()`. The server validates and clamps
-every call (max distance, max turn angle) before applying it, exactly like
-the "safety layer" described in your project write-up. Swapping this
-in-memory robot for a real ROS 2 / rosbridge connection later only means
-changing `execute_tool()` in `server.py` — nothing else in the pipeline
-changes.
+The LLM decides *what* to do, the safety layer decides what is *allowed*, and
+the Arduino executes it (and stops by itself if something is closer than 15 cm).
+
+**No car? No problem.** Without a car the server runs a simulated robot, so you
+can try everything (app, voice, LLM, safety limits) with just a laptop.
+
+## What's in this repo
+
+| Path | What it is |
+|---|---|
+| `server.py` | FastAPI backend: speech-to-text, LLM tool calls, safety layer, Bluetooth bridge |
+| `robot-app/` | The Tauri app (white, Tesla-style UI) for phone or desktop |
+| `arduino/cognibot/cognibot.ino` | Firmware for the car (Arduino UNO + L298N + HC-08) |
+| `static/index.html` | Simple browser UI served by the server (no build needed) |
+| `scan_ble.py` | Lists nearby Bluetooth LE devices (to check the car is visible) |
+
+---
 
 ## 1. Requirements
 
-- Windows 10/11
-- Python 3.10+ (https://www.python.org/downloads/) — during install, check
-  "Add python.exe to PATH"
-- A free Groq API key: https://console.groq.com/keys
-- A browser that supports microphone recording (Chrome, Edge, Firefox)
+- Windows 10/11 (the instructions use PowerShell)
+- [Python 3.10+](https://www.python.org/downloads/) — tick **"Add python.exe to PATH"**
+- A free [Groq API key](https://console.groq.com/keys)
+- For the app: [Node.js 20+](https://nodejs.org/)
+- Only for the desktop app / Android: [Rust](https://rustup.rs/); Android also needs
+  Android Studio (SDK + NDK), `JAVA_HOME`, `ANDROID_HOME`, `NDK_HOME`, and
+  `rustup target add aarch64-linux-android`
+- Only for the real car: Arduino IDE, plus the hardware below
 
-## 2. Setup
+## 2. Get the code
 
-Open PowerShell in this project folder and run:
+```powershell
+git clone https://github.com/sreeyanshyolo262/cognitiveProj.git
+cd cognitiveProj
+```
+
+## 3. Set up the server
 
 ```powershell
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
+copy .env.example .env
 ```
 
-Set your Groq API key for the current session:
+Open `.env` and set your key:
+
+```
+GROQ_API_KEY=your_groq_api_key_here
+```
+
+For **simulated mode** (no car), comment out or delete the `ROBOT_BLE` line.
+Never commit `.env` — it is git-ignored.
+
+## 4. Run the server
 
 ```powershell
-$env:GROQ_API_KEY = "your_groq_api_key_here"
+uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-(To avoid retyping it every time, you can instead set it permanently via
-Windows "Environment Variables" settings, or create a `.env` file — see the
-note at the bottom.)
+Leave this window open. Quick check: open <http://localhost:8000> — you get a
+simple page where you can already hold the mic or type commands and watch the
+simulated robot move.
 
-## 3. Run
+> `--host 0.0.0.0` is what lets your phone reach the laptop. Windows may ask to
+> allow Python through the firewall — choose **Private networks**. If it
+> doesn't ask, run once in an **admin** PowerShell:
+> `New-NetFirewallRule -DisplayName "Cognibot" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow`
+
+## 5. Run the app
 
 ```powershell
-uvicorn server:app --reload
+cd robot-app
+npm install
 ```
 
-Then open **http://localhost:8000** in your browser.
+Tell the app where your server is. Find your laptop's Wi-Fi address with
+`ipconfig` (the **IPv4 Address** under *Wireless LAN adapter Wi-Fi*), then:
 
-- Click and hold **"Hold to talk to the robot"**, say something like
-  *"move forward one metre"* or *"turn left ninety degrees, then move
-  forward two metres"*, and release.
-- Or just type a command in the text box and hit Send.
-- Watch the green triangle move on the grid — that's your simulated robot.
-  Its trail, position, heading and a fake battery level are all tracked.
-- "Reset robot" puts it back at the origin.
-
-## 4. Try these commands
-
-- "Go forward about a metre."
-- "Turn right ninety degrees."
-- "Move forward two metres and then turn left."
-- "Stop."
-- "Where are you?" (calls `get_position`)
-- "What's your battery level?"
-
-## 5. Project structure
-
-```
-voice-robot-project/
-├── server.py          FastAPI backend: /api/transcribe, /api/command, /api/state, /api/reset
-├── requirements.txt
-├── static/
-│   └── index.html     Recording button + canvas robot + command log (all JS, no build step)
-└── README.md
+```powershell
+copy .env.example .env.local
 ```
 
-## 6. Notes / things to adjust
+and edit `.env.local`:
 
-- **Model names**: the backend uses `whisper-large-v3` for speech-to-text and
-  `openai/gpt-oss-120b` for reasoning/tool-calling (matching the example you
-  gave). Change `STT_MODEL` / `LLM_MODEL` at the top of `server.py` if you
-  want to try a different Groq model.
-- **Safety limits**: `MAX_DISTANCE_M` and `MAX_TURN_DEG` in `server.py` cap
-  any single move/turn — tune these to match what you want to claim in your
-  report.
-- **`.env` file instead of an env var**: if you'd rather not set
-  `GROQ_API_KEY` every session, `pip install python-dotenv`, add
-  `from dotenv import load_dotenv; load_dotenv()` near the top of
-  `server.py`, and create a `.env` file containing
-  `GROQ_API_KEY=your_key_here` in this folder.
-- **Multiple users**: the robot pose is a single global variable for
-  simplicity (one shared robot). For a multi-user demo you'd key
-  `robot_state` by a session id instead.
-- **Moving to real ROS 2 later**: keep everything upstream of
-  `execute_tool()` identical; inside `execute_tool()`, instead of updating
-  `robot_state`, publish the corresponding `Twist` message to `/cmd_vel` via
-  rosbridge, exactly as described in your original architecture doc.
+```
+VITE_SERVER_URL=http://YOUR_LAPTOP_IP:8000
+```
+
+(You can also change it later inside the app: gear icon → Server.)
+
+Then pick one:
+
+**A. In the browser (quickest)**
+```powershell
+npm run dev
+```
+Open <http://localhost:1420>.
+
+**B. Desktop window**
+```powershell
+npm run tauri dev
+```
+
+**C. Android phone**
+1. On the phone: Settings → About phone → tap *Build number* 7 times →
+   Developer options → turn on **USB debugging**. Plug it into the laptop and
+   accept the prompt.
+2. Phone and laptop must be on the **same Wi-Fi**.
+3. First time only: `npm run tauri android init`, then in
+   `src-tauri/gen/android/app/src/main/AndroidManifest.xml` make sure these exist:
+   ```xml
+   <uses-permission android:name="android.permission.RECORD_AUDIO" />
+   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+   ```
+   and that `<application ... android:usesCleartextTraffic="true">`.
+   (This repo already includes the generated Android project with these set.)
+4. Run it:
+   ```powershell
+   npm run tauri android dev
+   ```
+
+### Using the app
+1. Tap **Connect** (it checks the server is reachable).
+2. Type a command, or **hold the mic**, speak, and release.
+3. Each command shows up as a card with what was heard, the actions the LLM
+   chose, and the exact Arduino commands that were sent (`F30`, `L90`, …).
+
+Things to try: *"move forward one metre"*, *"turn right ninety degrees then go
+back half a metre"*, *"stop"*, *"what's your battery level?"*
+
+---
+
+## 6. The real car (optional)
+
+### Hardware
+Arduino UNO + IO shield, L298N motor driver with 4 DC motors, HC-SR04
+ultrasonic sensor on an SG90 servo, and an **HC-08** BLE module.
+
+| Part | Arduino pins |
+|---|---|
+| L298N ENA, ENB | D5, D6 |
+| L298N N1, N2, N3, N4 | D7, D8, D9, D11 |
+| Ultrasonic Trig, Echo | A5, A4 |
+| SG90 servo | D3 |
+| Bluetooth module | D0 (RX) ← TXD, D1 (TX) → RXD |
+
+### Upload the firmware
+1. **Unplug the Bluetooth module** (D0/D1 are shared with USB uploads).
+2. Open `arduino/cognibot/cognibot.ino` in the Arduino IDE, board
+   **Arduino Uno**, and upload.
+3. Plug the Bluetooth module back in, unplug USB, and power the car from its
+   battery pack.
+
+### If the car drives the wrong way
+Top of `cognibot.ino` — adjust and re-upload. Test with the **wheels off the
+ground** first.
+
+```cpp
+const bool INVERT_SIDE_A = true;   // flip if one side's wheels spin backward
+const bool INVERT_SIDE_B = false;
+const bool SWAP_TURN     = true;   // flip if left/right turns are swapped
+```
+Wiring differs between cars, so these may need changing for yours.
+
+### Calibration (no wheel encoders, so motion is timed)
+- Send `F100`, measure the real distance `d` in cm →
+  `CM_PER_SEC = CM_PER_SEC × d / 100`
+- Send `R90`, measure the real angle `a` →
+  `DEG_PER_SEC = DEG_PER_SEC × a / 90`
+
+Re-check when the batteries get low.
+
+### Connect the server to the car
+The HC-08 is a **BLE** module — don't pair it in Windows settings.
+
+1. Check the laptop can see it: `python scan_ble.py` (should list `HC-08`).
+2. In `.env`: `ROBOT_BLE=HC-08` (name or address).
+3. Make sure nothing else (e.g. a phone Bluetooth terminal) is connected to it —
+   BLE modules accept only one connection.
+4. Restart the server. The first command takes a few seconds while it connects.
+
+Using a classic **HC-05** instead? Pair it in Windows, find its *Outgoing* COM
+port in Device Manager → Ports, and set `ROBOT_PORT=COM5` in `.env` (and remove
+`ROBOT_BLE`). Over USB you can test the same way with the Uno's COM port, but
+close the Arduino Serial Monitor first.
+
+### Serial protocol (server → Arduino, 9600 baud, newline-terminated)
+`F<cm>` / `B<cm>` drive · `L<deg>` / `R<deg>` turn · `S` stop · `P` ping.
+Replies: `OK`, `DONE`, `BLOCKED <cm>`, `STOPPED`, `ERR`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `GROQ_API_KEY is not set` | Create `.env` from `.env.example` and fill in the key (run uvicorn from the project folder). |
+| App says *Couldn't reach …* | Server not running, wrong IP in `.env.local`/gear menu, different Wi-Fi, or firewall (see step 4). `localhost` only works on the laptop itself, not on a phone. |
+| IP changed | Phones get a new laptop IP on a new network. Update `.env.local` or the gear menu. |
+| Mic does nothing on phone | Accept the microphone permission; make sure `RECORD_AUDIO` is in the manifest. |
+| `BLE device 'HC-08' not found` | Car is off, out of range, or another device is connected to it. Run `python scan_ble.py`. |
+| `LINK_ERROR` / `TIMEOUT` | Bluetooth link failed or the sketch isn't uploaded; baud must be 9600. |
+| Upload to Arduino fails | Unplug the Bluetooth module while uploading. |
+| Car stops immediately | The ultrasonic sensor sees something within 15 cm — that is the safety feature. |
+
+## Safety limits
+
+- Software (server): max 5 m per move, 180° per turn. Values outside are clamped.
+- Hardware (Arduino): hard limits of 500 cm / 180°, and an automatic stop if an
+  obstacle is closer than 15 cm while driving forward.
+
+Tune these in `server.py` (`MAX_DISTANCE_M`, `MAX_TURN_DEG`) and
+`cognibot.ino` (`STOP_DISTANCE_CM`, `MAX_CM`, `MAX_DEG`).
+
+## Notes
+
+- Models: `whisper-large-v3` (speech) and `openai/gpt-oss-120b` (tool calling),
+  set at the top of `server.py`.
+- The server holds one global robot — it's meant for one car and one operator.
+- Anyone on your Wi-Fi who knows the laptop's address could send commands while
+  the server is running. Only run it on networks you trust.

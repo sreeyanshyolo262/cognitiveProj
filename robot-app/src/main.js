@@ -1,9 +1,9 @@
 import "./style.css";
 
 const $ = (id) => document.getElementById(id);
-// Laptop's Wi-Fi address (works from the phone and on the laptop itself).
-// Change it in the gear menu if your network/IP changes.
-const DEFAULT_SERVER = "http://10.120.225.170:8000";
+// Default server address. Set VITE_SERVER_URL in robot-app/.env.local to your
+// laptop's Wi-Fi address (see README), or change it in the app's gear menu.
+const DEFAULT_SERVER = import.meta.env.VITE_SERVER_URL || "http://localhost:8000";
 
 let server = localStorage.getItem("cognibot.server") || DEFAULT_SERVER;
 let connected = false;

@@ -15,3 +15,4 @@ robot-app/src-tauri/gen/android/.gradle/
 robot-app/src-tauri/gen/android/build/
 robot-app/src-tauri/gen/android/app/build/
 robot-app/src-tauri/gen/android/local.properties
+robot-app/.env.local
