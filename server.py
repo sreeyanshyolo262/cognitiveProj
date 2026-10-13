@@ -64,11 +64,21 @@ MIN_TURN_DEG = 1.0
 robot_state = {"x": 0.0, "y": 0.0, "heading_deg": 0.0, "battery": 100}
 
 
+# Everything the robot has physically done since the last reset, as primitive
+# move/turn actions. "come back" and "undo" replay this in reverse, which
+# cancels the car's systematic timing errors far better than computing a
+# straight line from an estimated position.
+path_log: list[dict] = []
+command_starts: list[int] = []   # index into path_log where each command began
+
+
 def reset_robot():
     robot_state.update({"x": 0.0, "y": 0.0, "heading_deg": 0.0, "battery": 100})
+    path_log.clear()
+    command_starts.clear()
 
 
-HIGH_LEVEL = {"return_to_start", "draw_polygon", "run_plan"}
+HIGH_LEVEL = {"return_to_start", "undo", "draw_polygon", "run_plan"}
 MAX_ACTIONS = 24  # cap on how many steps one spoken command may expand to
 MAX_ROUNDS = 26   # cap on LLM <-> tool round trips per command
 
@@ -79,6 +89,78 @@ def _signed_turn(delta: float) -> list:
     if abs(delta) < MIN_TURN_DEG:
         return []
     return [("turn", {"direction": "right" if delta > 0 else "left", "degrees": abs(delta)})]
+
+
+def _compress(entries: list[dict]) -> list[dict]:
+    """Merge adjacent moves (net signed distance) and adjacent turns (net
+    signed angle, wrapped) so 4 x left 90 becomes nothing and forward 1 +
+    backward 1 cancels."""
+    out: list[tuple[str, float]] = []
+    for e in entries:
+        if e["tool"] == "move":
+            kind = "move"
+            val = e["distance_m"] if e["direction"] == "forward" else -e["distance_m"]
+        elif e["tool"] == "turn":
+            kind = "turn"
+            val = e["degrees"] if e["direction"] == "right" else -e["degrees"]
+        else:
+            continue
+        if out and out[-1][0] == kind:
+            out[-1] = (kind, out[-1][1] + val)
+        else:
+            out.append((kind, val))
+
+    steps = []
+    for kind, val in out:
+        if kind == "turn":
+            val = ((val + 180.0) % 360.0) - 180.0
+            if abs(val) < 0.5:
+                continue
+        elif abs(val) < 0.005:
+            continue
+        steps.append((kind, val))
+    return steps
+
+
+def _inverse_steps(entries: list[dict]) -> list:
+    """Steps that undo `entries` (a list of executed actions): net each run,
+    then play it back in reverse with every direction flipped. The steps are
+    marked record=False so the replay itself is not written to the path log."""
+    steps = []
+    for kind, val in reversed(_compress(entries)):
+        if kind == "move":
+            remaining = abs(val)
+            direction = "backward" if val > 0 else "forward"
+            while remaining > 1e-6:
+                chunk = min(remaining, MAX_DISTANCE_M)
+                steps.append(("move", {"direction": direction, "distance_m": chunk}, False))
+                remaining -= chunk
+        else:
+            direction = "left" if val > 0 else "right"
+            steps.append(("turn", {"direction": direction, "degrees": abs(val)}, False))
+    return steps
+
+
+def plan_undo() -> list:
+    """Inverse of the last command that actually moved the robot."""
+    while command_starts and command_starts[-1] >= len(path_log):
+        command_starts.pop()
+    if not command_starts:
+        return []
+    start = command_starts.pop()
+    last = path_log[start:]
+    del path_log[start:]
+    return _inverse_steps(last)
+
+
+def plan_backtrack() -> list:
+    """Retrace everything done since the last reset, in reverse."""
+    if not path_log:
+        return plan_return_to_start()  # nothing recorded: use the pose estimate
+    steps = _inverse_steps(list(path_log))
+    path_log.clear()
+    command_starts.clear()
+    return steps
 
 
 def plan_polygon(args: dict) -> list:
@@ -104,7 +186,9 @@ def plan_polygon(args: dict) -> list:
 def expand_tool(name: str, args: dict) -> list:
     """Turn a high-level tool call into the primitive steps that carry it out."""
     if name == "return_to_start":
-        return plan_return_to_start()
+        return plan_backtrack()
+    if name == "undo":
+        return plan_undo()
     if name == "draw_polygon":
         return plan_polygon(args)
     if name == "run_plan":
@@ -275,6 +359,19 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "undo",
+            "description": (
+                "Undo the robot's previous movement command by doing the exact "
+                "inverse (forward 1 m becomes backward 1 m, left 90 becomes "
+                "right 90). Use for 'undo', 'undo that', 'take that back', "
+                "'reverse the last command'. Can be called repeatedly."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "return_to_start",
             "description": (
                 "Drive the robot back to the place it started (its origin) and "
@@ -316,6 +413,9 @@ Rules:
   back" = steps: move forward, turn left, move backward). "Come back" inside
   a plan is {{"action": "return_to_start"}}. Single steps can be a plain move()
   or turn().
+- "undo", "undo that", "take that back", "reverse the last command" mean
+  undo(): the server replays the inverse of the previous command exactly.
+  This is different from "go back 1 metre", which is a plain backward move.
 - Never add turns the user did not ask for.
 - If the user asks to stop or cancel, call stop().
 - You may call more than one tool in a single response for compound
@@ -611,6 +711,7 @@ def command(req: CommandRequest):
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": req.text},
     ]
+    log_mark = len(path_log)
     actions = []
     reply_text = ""
     halted = False
@@ -670,7 +771,9 @@ def command(req: CommandRequest):
                 steps = [(name, args)]
                 results = []
                 while steps:
-                    step_name, step_args = steps.pop(0)
+                    step = steps.pop(0)
+                    step_name, step_args = step[0], step[1]
+                    record = step[2] if len(step) > 2 else True
                     if step_name in HIGH_LEVEL:
                         # expanded lazily so return_to_start sees the pose
                         # reached by the steps before it
@@ -685,6 +788,8 @@ def command(req: CommandRequest):
                         continue
                     actions.append(action)
                     results.append(action)
+                    if record and action["tool"] in ("move", "turn"):
+                        path_log.append(action)
                     # hardware refused / link down: don't run the rest blind
                     if action.get("robot_reply", "").startswith(
                         ("BLOCKED", "LINK_ERROR", "TIMEOUT", "STOPPED")
@@ -709,11 +814,16 @@ def command(req: CommandRequest):
         if any(c.function.name in HIGH_LEVEL | {"stop"} for c in tool_calls):
             break
 
+    if len(path_log) > log_mark:
+        command_starts.append(log_mark)
+
     if not reply_text:
         if halted and actions:
             reply_text = f"Stopped: {actions[-1].get('robot_reply')}"
         elif actions:
             reply_text = f"Done - {len(actions)} step{'s' if len(actions) != 1 else ''}."
+        else:
+            reply_text = "Nothing to do."
 
     return {
         "heard": req.text,

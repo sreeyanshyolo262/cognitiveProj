@@ -43,12 +43,26 @@ const uint8_t PIN_SERVO = 3;
 
 // ------------------------------------------------- tuning / calibration
 // Without encoders, distance and angle are TIME based. Measure and adjust:
+//   Easiest: run  python calibrate.py  (stop the server first). It sends two
+//   test distances and two test angles, asks what you measured, and prints
+//   the rate AND offset constants below. Rough manual way:
 //   1. send F100, measure real distance d  -> CM_PER_SEC = CM_PER_SEC * d / 100
 //   2. send R90,  measure real angle a     -> DEG_PER_SEC = DEG_PER_SEC * a / 90
 const uint8_t DRIVE_SPEED = 170;      // PWM 0-255 for straight driving
 const uint8_t TURN_SPEED  = 170;      // PWM 0-255 for spinning
 float CM_PER_SEC  = 30.0;             // measured at DRIVE_SPEED
 float DEG_PER_SEC = 120.0;            // measured at TURN_SPEED
+
+// Real motion = rate * time + offset (start-up lag makes it shorter, coasting
+// makes it longer). Run calibrate.py - it measures both and prints these.
+//   time = (requested - OFFSET) / RATE
+float MOVE_OFFSET_CM  = 0.0;          // extra cm travelled beyond rate*time
+float TURN_OFFSET_DEG = 0.0;          // extra degrees turned beyond rate*time
+
+// After every motion: brake, then wait for the car to stop rocking, BEFORE
+// replying DONE. Without this, chained turns add up the previous coast.
+const unsigned int BRAKE_MS  = 120;
+const unsigned int SETTLE_MS = 300;
 
 // If a side spins the wrong way, flip its flag.
 const bool INVERT_SIDE_A = true;      // N1/N2 (ENA) motors
@@ -98,6 +112,21 @@ void stopMotors() {
   mode = IDLE;
 }
 
+// Active brake (both inputs low + enable high shorts the motor terminals),
+// then let the chassis settle so the next command starts from rest.
+void brakeAndSettle() {
+  digitalWrite(PIN_N1, LOW);
+  digitalWrite(PIN_N2, LOW);
+  digitalWrite(PIN_N3, LOW);
+  digitalWrite(PIN_N4, LOW);
+  analogWrite(PIN_ENA, 255);
+  analogWrite(PIN_ENB, 255);
+  delay(BRAKE_MS);
+  drive(0, 0, 0);
+  delay(SETTLE_MS);
+  mode = IDLE;
+}
+
 // -------------------------------------------------------- ultrasonic
 // Returns distance in cm, or 999 if no echo (nothing in range).
 int readDistanceCm() {
@@ -125,14 +154,16 @@ void startMotion(Mode m, long amount) {
     }
     int dir = (m == FORWARD) ? 1 : -1;
     drive(dir, dir, DRIVE_SPEED);
-    motionEnd = millis() + (unsigned long)(amount / CM_PER_SEC * 1000.0f);
+    float cm = max(0.0f, amount - MOVE_OFFSET_CM);
+    motionEnd = millis() + (unsigned long)(cm / CM_PER_SEC * 1000.0f);
   } else {
     amount = constrain(amount, 1, MAX_DEG);
     bool left = (m == TURN_LEFT);
     if (SWAP_TURN) left = !left;
     // spin in place: left side backward + right side forward = turn left
     drive(left ? -1 : 1, left ? 1 : -1, TURN_SPEED);
-    motionEnd = millis() + (unsigned long)(amount / DEG_PER_SEC * 1000.0f);
+    float deg = max(0.0f, amount - TURN_OFFSET_DEG);
+    motionEnd = millis() + (unsigned long)(deg / DEG_PER_SEC * 1000.0f);
   }
   mode = m;
   lastCheck = millis();
@@ -149,7 +180,7 @@ void handleLine(const char *s) {
     case 'L': case 'l': stopMotors(); startMotion(TURN_LEFT, n); break;
     case 'R': case 'r': stopMotors(); startMotion(TURN_RIGHT,n); break;
     case 'S': case 's':
-      if (mode != IDLE) { stopMotors(); Serial.println(F("STOPPED")); }
+      if (mode != IDLE) { brakeAndSettle(); Serial.println(F("STOPPED")); }
       else Serial.println(F("DONE"));
       break;
     case 'P': case 'p':
@@ -209,7 +240,7 @@ void loop() {
     lastCheck = now;
     int d = readDistanceCm();
     if (d < STOP_DISTANCE_CM) {
-      stopMotors();
+      brakeAndSettle();
       Serial.print(F("BLOCKED "));
       Serial.println(d);
       return;
@@ -217,7 +248,7 @@ void loop() {
   }
 
   if ((long)(now - motionEnd) >= 0) {
-    stopMotors();
+    brakeAndSettle();
     Serial.println(F("DONE"));
   }
 }
