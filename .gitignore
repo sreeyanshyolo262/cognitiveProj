@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# python
+venv/
+__pycache__/
+*.pyc
+
+# node / tauri
+robot-app/node_modules/
+robot-app/dist/
+robot-app/src-tauri/target/
+robot-app/src-tauri/gen/schemas/
+robot-app/src-tauri/gen/android/.gradle/
+robot-app/src-tauri/gen/android/build/
+robot-app/src-tauri/gen/android/app/build/
+robot-app/src-tauri/gen/android/local.properties

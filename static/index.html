@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice → Robot</title>
+<style>
+  :root{
+    --bg: #0e1512;
+    --panel: #141d19;
+    --line: #24332c;
+    --ink: #e9f2ec;
+    --dim: #8fa79a;
+    --accent: #5ee6a8;
+    --accent-dim: #2c5943;
+    --warn: #e6b85e;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body{
+    margin:0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    display:flex;
+    justify-content:center;
+    padding: 32px 16px;
+  }
+  .app{
+    width:100%;
+    max-width: 980px;
+    display:grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 20px;
+  }
+  @media (max-width: 800px){
+    .app{ grid-template-columns: 1fr; }
+  }
+  header{
+    grid-column: 1 / -1;
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    margin-bottom: 4px;
+  }
+  h1{
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin: 0;
+  }
+  h1 span{ color: var(--accent); }
+  .sub{ color: var(--dim); font-size: 0.82rem; }
+
+  .panel{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+  }
+
+  /* --- Stage / canvas --- */
+  .stage-wrap{ display:flex; flex-direction:column; gap:12px; }
+  canvas{
+    width:100%;
+    aspect-ratio: 1 / 1;
+    background:
+      linear-gradient(var(--line) 1px, transparent 1px) 0 0 / 32px 32px,
+      linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0 / 32px 32px,
+      #0b110e;
+    border-radius: 8px;
+    display:block;
+  }
+  .pose-row{
+    display:flex;
+    gap: 14px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--dim);
+  }
+  .pose-row b{ color: var(--ink); font-weight: 500; }
+  .reset-btn{
+    align-self:flex-start;
+    background:none;
+    border:1px solid var(--line);
+    color: var(--dim);
+    font-family: var(--sans);
+    font-size: 0.76rem;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor:pointer;
+  }
+  .reset-btn:hover{ color: var(--ink); border-color: var(--dim); }
+
+  /* --- Controls / log --- */
+  .controls{ display:flex; flex-direction:column; gap:16px; }
+
+  .record-btn{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:10px;
+    width:100%;
+    padding: 16px;
+    border-radius: 10px;
+    border: 1px solid var(--accent-dim);
+    background: rgba(94,230,168,0.08);
+    color: var(--accent);
+    font-family: var(--sans);
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .record-btn:hover{ background: rgba(94,230,168,0.14); }
+  .record-btn.recording{
+    border-color: #e66a5e;
+    background: rgba(230,106,94,0.1);
+    color: #ff8a7a;
+  }
+  .dot{
+    width:9px; height:9px; border-radius:50%;
+    background: currentColor;
+  }
+  .record-btn.recording .dot{ animation: pulse 1s infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:0.25;} }
+
+  .type-row{ display:flex; gap:8px; }
+  .type-row input{
+    flex:1;
+    background: #0b110e;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 0.88rem;
+  }
+  .type-row input:focus{ outline:none; border-color: var(--accent-dim); }
+  .type-row button{
+    background: var(--line);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 0 16px;
+    font-family: var(--sans);
+    font-size: 0.85rem;
+    cursor:pointer;
+  }
+  .type-row button:hover{ border-color: var(--dim); }
+
+  .log{
+    flex:1;
+    min-height: 220px;
+    max-height: 360px;
+    overflow-y:auto;
+    background: #0b110e;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    display:flex;
+    flex-direction:column;
+    gap: 10px;
+  }
+  .entry .who{
+    color: var(--dim);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .entry.you .who{ color: #7fb0e0; }
+  .entry.robot .who{ color: var(--accent); }
+  .entry.system .who{ color: var(--warn); }
+  .entry .body{ color: var(--ink); white-space: pre-wrap; }
+  .action-line{ color: var(--dim); }
+  .action-line b{ color: var(--accent); font-weight: 500; }
+
+  .status-bar{
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--dim);
+    min-height: 1.2em;
+  }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>voice <span>&rarr;</span> robot</h1>
+      <div class="sub">simulated world · no ROS / Gazebo required</div>
+    </header>
+
+    <div class="panel stage-wrap">
+      <canvas id="stage" width="600" height="600"></canvas>
+      <div class="pose-row">
+        <div>x <b id="poseX">0.00</b> m</div>
+        <div>y <b id="poseY">0.00</b> m</div>
+        <div>heading <b id="poseH">0</b>&deg;</div>
+        <div>battery <b id="poseBatt">100</b>%</div>
+      </div>
+      <button class="reset-btn" id="resetBtn">Reset robot</button>
+    </div>
+
+    <div class="panel controls">
+      <button class="record-btn" id="recordBtn">
+        <span class="dot"></span>
+        <span id="recordLabel">Hold to talk to the robot</span>
+      </button>
+
+      <div class="type-row">
+        <input id="textInput" type="text" placeholder="…or type a command, e.g. move forward 2 metres" />
+        <button id="sendBtn">Send</button>
+      </div>
+
+      <div class="log" id="log"></div>
+      <div class="status-bar" id="statusBar"></div>
+    </div>
+  </div>
+
+<script>
+const API = ""; // same origin
+
+// ---------------- Canvas / robot rendering ----------------
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const PIXELS_PER_METRE = 60;
+
+let pose = { x: 0, y: 0, heading_deg: 0 };
+let trail = [{x:0, y:0}];
+
+function toScreen(x, y){
+  return {
+    sx: canvas.width / 2 + x * PIXELS_PER_METRE,
+    sy: canvas.height / 2 - y * PIXELS_PER_METRE,
+  };
+}
+
+function drawRobot(){
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // trail
+  ctx.beginPath();
+  trail.forEach((p, i) => {
+    const {sx, sy} = toScreen(p.x, p.y);
+    if(i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+  });
+  ctx.strokeStyle = "#2c5943";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // origin marker
+  const origin = toScreen(0,0);
+  ctx.beginPath();
+  ctx.arc(origin.sx, origin.sy, 3, 0, Math.PI*2);
+  ctx.fillStyle = "#3a4a42";
+  ctx.fill();
+
+  // robot body
+  const {sx, sy} = toScreen(pose.x, pose.y);
+  const rad = (-pose.heading_deg) * Math.PI / 180;
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(rad);
+
+  ctx.beginPath();
+  ctx.moveTo(16, 0);
+  ctx.lineTo(-12, 10);
+  ctx.lineTo(-6, 0);
+  ctx.lineTo(-12, -10);
+  ctx.closePath();
+  ctx.fillStyle = "#5ee6a8";
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function setPose(newState){
+  pose = newState;
+  trail.push({x: newState.x, y: newState.y});
+  if(trail.length > 500) trail.shift();
+  document.getElementById("poseX").textContent = newState.x.toFixed(2);
+  document.getElementById("poseY").textContent = newState.y.toFixed(2);
+  document.getElementById("poseH").textContent = Math.round(newState.heading_deg);
+  document.getElementById("poseBatt").textContent = newState.battery ?? "-";
+  drawRobot();
+}
+
+// Smoothly animate between two poses over `duration` ms (purely visual).
+function animateTo(targetState, duration=500){
+  return new Promise(resolve => {
+    const start = {...pose};
+    // handle heading wrap-around by taking the shortest path
+    let dh = targetState.heading_deg - start.heading_deg;
+    dh = ((dh + 180) % 360 + 360) % 360 - 180;
+    const t0 = performance.now();
+
+    function step(now){
+      const t = Math.min(1, (now - t0) / duration);
+      const eased = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+      const cur = {
+        x: start.x + (targetState.x - start.x) * eased,
+        y: start.y + (targetState.y - start.y) * eased,
+        heading_deg: start.heading_deg + dh * eased,
+        battery: targetState.battery,
+      };
+      pose = cur;
+      drawRobot();
+      if(t < 1){
+        requestAnimationFrame(step);
+      } else {
+        setPose(targetState);
+        resolve();
+      }
+    }
+    requestAnimationFrame(step);
+  });
+}
+
+drawRobot();
+
+// ---------------- Log helpers ----------------
+const logEl = document.getElementById("log");
+function addEntry(who, text){
+  const div = document.createElement("div");
+  div.className = "entry " + who;
+  div.innerHTML = `<div class="who">${who}</div><div class="body"></div>`;
+  div.querySelector(".body").textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+  return div;
+}
+function addActionsLine(actions){
+  if(!actions.length) return;
+  const div = document.createElement("div");
+  div.className = "entry robot";
+  const lines = actions.map(a => describeAction(a));
+  div.innerHTML = `<div class="who">robot</div><div class="body"></div>`;
+  const body = div.querySelector(".body");
+  lines.forEach(l => {
+    const p = document.createElement("div");
+    p.className = "action-line";
+    p.innerHTML = l;
+    body.appendChild(p);
+  });
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function describeAction(a){
+  if(a.tool === "move") return `&#9881; <b>move</b> ${a.direction} ${a.distance_m} m`;
+  if(a.tool === "turn") return `&#9881; <b>turn</b> ${a.direction} ${a.degrees}&deg;`;
+  if(a.tool === "stop") return `&#9881; <b>stop</b>`;
+  if(a.tool === "get_position") return `&#9881; <b>get_position</b> &rarr; (${a.resulting_pose.x.toFixed(2)}, ${a.resulting_pose.y.toFixed(2)})`;
+  if(a.tool === "get_battery") return `&#9881; <b>get_battery</b> &rarr; ${a.battery}%`;
+  return `&#9881; ${a.tool}`;
+}
+
+function setStatus(text){
+  document.getElementById("statusBar").textContent = text;
+}
+
+// ---------------- Command pipeline (shared by voice + typed text) ----------------
+async function sendCommand(text){
+  addEntry("you", text);
+  setStatus("Thinking…");
+  try{
+    const res = await fetch(API + "/api/command", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text}),
+    });
+    if(!res.ok){
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    const data = await res.json();
+
+    if(data.actions.length === 0){
+      addEntry("system", data.reply || "No action was taken.");
+    } else {
+      // animate through each action's resulting pose in sequence
+      for(const action of data.actions){
+        if(action.resulting_pose){
+          await animateTo(action.resulting_pose, 550);
+        }
+      }
+      addActionsLine(data.actions);
+      if(data.reply) addEntry("system", data.reply);
+    }
+  } catch(e){
+    addEntry("system", "Error: " + e.message);
+  } finally {
+    setStatus("");
+  }
+}
+
+// ---------------- Typed input ----------------
+document.getElementById("sendBtn").addEventListener("click", () => {
+  const input = document.getElementById("textInput");
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = "";
+  sendCommand(text);
+});
+document.getElementById("textInput").addEventListener("keydown", (e) => {
+  if(e.key === "Enter") document.getElementById("sendBtn").click();
+});
+
+// ---------------- Recording ----------------
+const recordBtn = document.getElementById("recordBtn");
+const recordLabel = document.getElementById("recordLabel");
+let mediaRecorder = null;
+let chunks = [];
+let stream = null;
+
+async function startRecording(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch(e){
+    addEntry("system", "Microphone access was denied or unavailable: " + e.message);
+    return;
+  }
+  chunks = [];
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = (e) => { if(e.data.size > 0) chunks.push(e.data); };
+  mediaRecorder.onstop = onRecordingStop;
+  mediaRecorder.start();
+  recordBtn.classList.add("recording");
+  recordLabel.textContent = "Recording… release to send";
+}
+
+function stopRecording(){
+  if(mediaRecorder && mediaRecorder.state !== "inactive"){
+    mediaRecorder.stop();
+  }
+  if(stream){
+    stream.getTracks().forEach(t => t.stop());
+  }
+  recordBtn.classList.remove("recording");
+  recordLabel.textContent = "Hold to talk to the robot";
+}
+
+async function onRecordingStop(){
+  const blob = new Blob(chunks, {type: "audio/webm"});
+  if(blob.size < 1000){
+    setStatus("Recording was too short.");
+    return;
+  }
+  setStatus("Transcribing…");
+  const form = new FormData();
+  form.append("audio", blob, "command.webm");
+
+  try{
+    const res = await fetch(API + "/api/transcribe", {method: "POST", body: form});
+    if(!res.ok){
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    const data = await res.json();
+    setStatus("");
+    if(!data.text){
+      addEntry("system", "Didn't catch that — try again.");
+      return;
+    }
+    await sendCommand(data.text);
+  } catch(e){
+    setStatus("");
+    addEntry("system", "Transcription error: " + e.message);
+  }
+}
+
+// Hold-to-talk: mouse + touch + keyboard (spacebar) friendly
+recordBtn.addEventListener("mousedown", startRecording);
+recordBtn.addEventListener("mouseup", stopRecording);
+recordBtn.addEventListener("mouseleave", () => { if(mediaRecorder && mediaRecorder.state === "recording") stopRecording(); });
+recordBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
+recordBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); });
+
+// ---------------- Reset ----------------
+document.getElementById("resetBtn").addEventListener("click", async () => {
+  const res = await fetch(API + "/api/reset", {method: "POST"});
+  const data = await res.json();
+  trail = [{x:0, y:0}];
+  setPose(data);
+  logEl.innerHTML = "";
+});
+</script>
+</body>
+</html>
