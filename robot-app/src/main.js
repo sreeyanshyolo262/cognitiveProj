@@ -8,6 +8,7 @@ const DEFAULT_SERVER = import.meta.env.VITE_SERVER_URL || "http://localhost:8000
 let server = localStorage.getItem("cognibot.server") || DEFAULT_SERVER;
 let connected = false;
 let busy = false;
+let isSim = false; // true when talking to homebot (the simulated house), not the real car
 
 // ---------- helpers ----------
 
@@ -45,12 +46,20 @@ const setBusy = (b, label) => {
 
 function renderState(s) {
   if (!s) return;
-  const pct = Math.max(0, Math.min(100, Math.round(s.battery ?? 0)));
+  // real car: {x,y,heading_deg,battery}. sim house: {robot:{x,z,th,battery,room,task,docked}}
+  const battery = isSim ? s.robot?.battery : s.battery;
+  const pct = Math.max(0, Math.min(100, Math.round(battery ?? 0)));
   $("batText").textContent = pct + "%";
   $("batFill").style.width = pct + "%";
   $("batFill").style.background = pct < 20 ? "var(--bad)" : "var(--ok)";
-  $("posText").textContent = `${s.x.toFixed(2)} m, ${s.y.toFixed(2)} m`;
-  $("headText").textContent = `${Math.round(s.heading_deg)}°`;
+  if (isSim) {
+    const r = s.robot || {};
+    $("posText").textContent = r.room || "—";
+    $("headText").textContent = r.docked ? "Docked" : cap(r.activity || "idle");
+  } else {
+    $("posText").textContent = `${s.x.toFixed(2)} m, ${s.y.toFixed(2)} m`;
+    $("headText").textContent = `${Math.round(s.heading_deg)}°`;
+  }
 }
 
 function describe(a) {
@@ -60,6 +69,14 @@ function describe(a) {
     case "stop": return "Stop";
     case "get_position": return "Check position";
     case "get_battery": return `Battery ${a.battery}%`;
+    case "navigate_to": return `→ ${a.args?.target ?? ""}`.replaceAll("_", " ");
+    case "look_at": return a.args?.target ? `👁 Look at ${a.args.target}`.replaceAll("_", " ") : "👁 Look around";
+    case "watch_until_change": return `👁 Watch ${a.args?.target ?? ""}`.replaceAll("_", " ");
+    case "pick_up": return `Pick up ${a.args?.item ?? ""}`.replaceAll("_", " ");
+    case "drop_off": return `Drop off ${a.args?.item ?? ""}`.replaceAll("_", " ");
+    case "operate_appliance": return `${cap(a.args?.action ?? "")} ${a.args?.appliance ?? ""}`.replaceAll("_", " ");
+    case "go_charge": return "🔋 Go charge";
+    case "get_status": return "Status check";
     default: return a.tool;
   }
 }
@@ -93,8 +110,8 @@ function addCard({ heard, reply, actions = [], error }) {
     chips.className = "chips";
     actions.forEach((a) => {
       const c = document.createElement("span");
-      c.className = "chip";
-      c.textContent = describe(a);
+      c.className = "chip" + (a.result && a.result.ok === false ? " bad" : "");
+      c.textContent = describe(a) + (a.result && a.result.ok === false ? " ✕" : "");
       chips.appendChild(c);
     });
     card.appendChild(chips);
@@ -133,12 +150,19 @@ async function connect() {
   $("connectHint").className = "hint";
   try {
     const state = await api("/api/state", {}, 6000);
+    isSim = !!state.robot; // homebot's /api/state has a nested "robot" object
     connected = true;
     $("connectView").hidden = true;
     $("connectedView").hidden = false;
     $("batteryRow").hidden = false;
     $("dock").hidden = false;
-    $("srvText").textContent = server.replace(/^https?:\/\//, "");
+    $("heroReal").hidden = isSim;
+    $("simView").hidden = !isSim;
+    if (isSim) {
+      $("simFrame").src = server.replace(/\/+$/, "") + "/";
+      startSimPoll();
+    }
+    $("srvText").textContent = (isSim ? "🏠 Sim — " : "") + server.replace(/^https?:\/\//, "");
     setStatus("on", "Connected");
     renderState(state);
   } catch (e) {
@@ -155,13 +179,32 @@ async function connect() {
 
 function disconnect() {
   connected = false;
+  stopSimPoll();
   $("connectView").hidden = false;
   $("connectedView").hidden = true;
   $("batteryRow").hidden = true;
   $("dock").hidden = true;
+  $("heroReal").hidden = false;
+  $("simView").hidden = true;
+  $("simFrame").src = "about:blank";
   $("connectHint").className = "hint";
   $("connectHint").textContent = "Make sure the server is running on your laptop.";
   setStatus("", "Offline");
+}
+
+// Sim's /api/state changes continuously (robot driving, milk boiling, etc.) —
+// poll it to keep the battery/room/task row live even with no command in flight.
+let simPollTimer = null;
+function startSimPoll() {
+  stopSimPoll();
+  simPollTimer = setInterval(async () => {
+    if (!connected || !isSim) return;
+    try { renderState(await api("/api/state", {}, 4000)); } catch { /* transient */ }
+  }, 1000);
+}
+function stopSimPoll() {
+  if (simPollTimer) clearInterval(simPollTimer);
+  simPollTimer = null;
 }
 
 // ---------- commands ----------
@@ -176,13 +219,33 @@ async function sendCommand(text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     });
-    addCard({ heard: r.heard, reply: r.reply, actions: r.actions });
-    renderState(r.state);
+    if (isSim && r.accepted) {
+      await pollSimResult(text);
+    } else {
+      addCard({ heard: r.heard, reply: r.reply, actions: r.actions });
+      renderState(r.state);
+    }
   } catch (e) {
     addCard({ heard: text, error: e.message });
   } finally {
     setBusy(false);
   }
+}
+
+// The sim robot runs each command in the background (navigating across rooms
+// takes real time), so /api/command returns instantly and we watch the
+// world's "busy" flag, then fetch what actually happened.
+async function pollSimResult(text) {
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    const s = await api("/api/state", {}, 5000);
+    renderState(s);
+    if (s.speech?.text) setBusy(true, s.robot?.task || "Working…");
+    if (!s.busy) break;
+    await new Promise((res) => setTimeout(res, 450));
+  }
+  const r = await api("/api/last_result", {}, 5000);
+  addCard({ heard: r.heard || text, reply: r.reply, actions: r.actions || [] });
 }
 
 $("cmdForm").addEventListener("submit", (e) => {
@@ -196,8 +259,18 @@ $("stopBtn").onclick = () => sendCommand("stop");
 $("batteryBtn").onclick = () => sendCommand("what's your battery level?");
 $("resetBtn").onclick = async () => {
   try {
-    renderState(await api("/api/reset", { method: "POST" }));
-    addCard({ heard: "Reset robot to start", reply: "Position and battery reset." });
+    if (isSim) {
+      await api("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reset" }),
+      });
+      renderState(await api("/api/state"));
+      addCard({ heard: "Reset world", reply: "The house, robot and battery were reset." });
+    } else {
+      renderState(await api("/api/reset", { method: "POST" }));
+      addCard({ heard: "Reset robot to start", reply: "Position and battery reset." });
+    }
   } catch (e) {
     addCard({ heard: "Reset", error: e.message });
   }

@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cognibot Home</title>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--ink:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;overflow:hidden}
+  #app{display:grid;grid-template-columns:1fr 340px;height:100vh}
+  #viewport{position:relative}
+  #viewport canvas{display:block}
+  .hud{position:absolute;left:14px;top:14px;background:rgba(22,27,34,.85);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px;min-width:220px}
+  .hud h1{font-size:15px;margin:0 0 6px;font-weight:600}
+  .row{display:flex;justify-content:space-between;gap:10px;padding:2px 0;color:var(--muted)}
+  .row b{color:var(--ink);font-weight:500}
+  .bat{width:70px;height:10px;border:1px solid var(--line);border-radius:4px;overflow:hidden;display:inline-block;vertical-align:middle;margin-right:6px}
+  .bat i{display:block;height:100%;background:var(--ok)}
+  .bubble{position:absolute;left:50%;top:14px;transform:translateX(-50%);max-width:640px;background:rgba(22,27,34,.92);border:1px solid var(--accent);border-radius:14px;padding:10px 18px;font-size:15px;text-align:center;opacity:0;transition:opacity .3s;pointer-events:none}
+  .bubble.show{opacity:1}
+  .camline{position:absolute;right:14px;top:14px;display:flex;gap:8px;align-items:center;background:rgba(22,27,34,.85);border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  .dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+  #side{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  #side h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:14px 14px 8px}
+  #log{flex:1;overflow-y:auto;padding:0 14px 10px;display:flex;flex-direction:column-reverse;gap:6px}
+  .ev{font-size:12.5px;padding:7px 10px;border-radius:8px;background:#0d1117;border:1px solid var(--line);line-height:1.4}
+  .ev.ok{border-color:#2ea04344}
+  .ev.warn{border-color:var(--warn);color:#f0c674}
+  #scn{padding:10px 14px;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  #scn button{background:#21262d;border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:7px 6px;font-size:11.5px;cursor:pointer;text-align:left}
+  #scn button:hover{border-color:var(--accent)}
+  #det{padding:8px 14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);max-height:90px;overflow:auto}
+  #det .d{padding:2px 0}
+  .connBox{position:absolute;inset:0;background:rgba(13,17,23,.96);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;z-index:5}
+  .connBox input{width:280px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:#0d1117;color:var(--ink);font-size:14px}
+  .connBox button{padding:10px 20px;border-radius:999px;border:0;background:var(--accent);color:#06122a;font-weight:600;cursor:pointer}
+  .connBox p{color:var(--muted);font-size:13px;max-width:360px;text-align:center}
+  @media (max-width:860px){#app{grid-template-columns:1fr}#side{display:none}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="viewport">
+    <div class="hud">
+      <h1>🏠 Cognibot Home</h1>
+      <div class="row">Room <b id="hRoom">-</b></div>
+      <div class="row">Battery <span><span class="bat"><i id="hBatBar" style="width:0%"></i></span><b id="hBat">-</b></span></div>
+      <div class="row">Task <b id="hTask">-</b></div>
+      <div class="row">Carrying <b id="hCarry">-</b></div>
+    </div>
+    <div class="camline"><span class="dot" id="camDot"></span><span id="camText">Camera mast lowered</span></div>
+    <div class="bubble" id="bubble"></div>
+  </div>
+  <div id="side">
+    <h2>Event log</h2>
+    <div id="log"></div>
+    <div id="det"><div class="d" style="color:#666">Nothing in camera view</div></div>
+    <h2>Demo scenario controls</h2>
+    <div id="scn">
+      <button data-a="milk_almost">🥛 Milk: almost hot</button>
+      <button data-a="milk_boil">🥛 Milk: boiling</button>
+      <button data-a="milk_cold">🥛 Milk: cold</button>
+      <button data-a="block_hallway">📦 Block hallway</button>
+      <button data-a="clear_boxes">🧹 Clear boxes</button>
+      <button data-a="door_open">🚪 Open front door</button>
+      <button data-a="door_close">🚪 Close front door</button>
+      <button data-a="battery_low">🔋 Battery → low</button>
+      <button data-a="reset">↺ Reset world</button>
+    </div>
+  </div>
+  <div class="connBox" id="connBox">
+    <h1 style="margin:0">🏠 Cognibot Home</h1>
+    <p>Simulated house for the demo. Point your phone app's server address at
+       <b id="hereUrl"></b> and talk to the robot there — this screen just
+       shows what it's doing. Reload any time.</p>
+  </div>
+</div>
+<script>
+const $ = (s)=>document.querySelector(s);
+$('#hereUrl').textContent = location.origin;
+setTimeout(()=>{document.getElementById('connBox').style.display='none'}, 4500);
+
+// ---------------- scenario buttons ----------------
+document.querySelectorAll('#scn button').forEach(b=>{
+  b.onclick = ()=> fetch('/api/control', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action: b.dataset.a})});
+});
+
+// ---------------- three.js scene ----------------
+const vp = $('#viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog = new THREE.Fog(0x0d1117, 14, 30);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.shadowMap.enabled = true;
+vp.appendChild(renderer.domElement);
+
+function resize(){
+  const w = vp.clientWidth, h = vp.clientHeight;
+  renderer.setSize(w,h); camera.aspect = w/h; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1a1f26, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+sun.position.set(8, 14, 6); sun.castShadow = true;
+sun.shadow.mapSize.set(2048,2048);
+sun.shadow.camera.left=-10; sun.shadow.camera.right=10; sun.shadow.camera.top=10; sun.shadow.camera.bottom=-10;
+scene.add(sun);
+
+const FLOOR_COLORS = {bedroom:0x3a4a5c, bathroom:0x3a5a5c, study:0x4a4a3c, hallway:0x2e333b, living_room:0x4a3c52, kitchen:0x4a4030};
+const FURN_COLORS = {bed:0x7b9fd1, table:0x8a6b4e, wardrobe:0x5a6b7a, armchair:0x9b6b5e, bathtub:0xcfe3ec, toilet:0xe6edf3,
+  sink:0xcfe3ec, desk:0x8a6b4e, chair:0x6b7a8a, bookshelf:0x6b4e3a, plant:0x3f8f5f, dock:0x2ea043, tvstand:0x3a3f47,
+  sofa:0x7a4e6b, tv:0x111318, fridge:0xd7dde3, counter:0x5b6670, rug:0x2a3340};
+
+let world3 = new THREE.Group(); scene.add(world3);
+let map = null, staticBuilt = false;
+let robotG, mastG, bodyMat, wheelMeshes=[], carrySlots=[], pathLine, pathMat, speechSprite;
+let itemMeshes = {}, dockGlow;
+
+function box(w,h,d,color,opts={}){
+  const g = new THREE.BoxGeometry(w,h,d);
+  const m = new THREE.MeshStandardMaterial({color, roughness:.85, metalness:.05, ...opts});
+  const mesh = new THREE.Mesh(g,m);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  return mesh;
+}
+function label(text, color='#e6edf3'){
+  const c = document.createElement('canvas'); c.width=256; c.height=64;
+  const ctx = c.getContext('2d');
+  ctx.font='bold 30px -apple-system,Segoe UI'; ctx.fillStyle=color; ctx.textAlign='center';
+  ctx.fillText(text, 128, 42);
+  const tex = new THREE.CanvasTexture(c);
+  const sm = new THREE.SpriteMaterial({map:tex, depthTest:false});
+  const sp = new THREE.Sprite(sm); sp.scale.set(1.6,0.4,1); sp.renderOrder=10;
+  return sp;
+}
+
+function buildStatic(m){
+  map = m;
+  const [W,H] = m.size;
+  // floor per room
+  for (const [rid,r] of Object.entries(m.rooms)){
+    const [x0,z0,x1,z1] = r.rect;
+    const geo = new THREE.PlaneGeometry(x1-x0, z1-z0);
+    const mat = new THREE.MeshStandardMaterial({color: FLOOR_COLORS[rid]||0x333, roughness:1});
+    const pl = new THREE.Mesh(geo, mat);
+    pl.rotation.x = -Math.PI/2; pl.position.set((x0+x1)/2, 0, (z0+z1)/2); pl.receiveShadow = true;
+    world3.add(pl);
+    const sp = label(r.name, '#9fb3c8'); sp.position.set((x0+x1)/2, 2.3, (z0+z1)/2); world3.add(sp);
+  }
+  // outer ground
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(W+6,H+6), new THREE.MeshStandardMaterial({color:0x05070a}));
+  ground.rotation.x=-Math.PI/2; ground.position.set(W/2,-0.02,H/2); ground.receiveShadow=true; world3.add(ground);
+  // walls
+  const wallMat = new THREE.MeshStandardMaterial({color:0xcbd3db, roughness:.9});
+  for (const [x0,z0,x1,z1] of m.walls){
+    const w = Math.max(x1-x0, 0.02), d = Math.max(z1-z0, 0.02);
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, m.wall_h, d), wallMat);
+    wall.position.set((x0+x1)/2, m.wall_h/2, (z0+z1)/2);
+    wall.castShadow = true; wall.receiveShadow = true;
+    world3.add(wall);
+  }
+  // front door leaf
+  const [dx0,dz0,dx1,dz1] = m.front_door;
+  const door = new THREE.Mesh(new THREE.BoxGeometry(dx1-dx0, 2.0, Math.max(dz1-dz0,0.06)),
+    new THREE.MeshStandardMaterial({color:0x6b4428}));
+  door.position.set((dx0+dx1)/2, 1.0, dz0); door.castShadow=true;
+  door.userData.hinge = dz0; world3.add(door); window.__door = door;
+
+  // furniture
+  for (const [fid,f] of Object.entries(m.furniture)){
+    const [x0,z0,x1,z1] = f.rect;
+    const color = FURN_COLORS[f.type] ?? 0x666;
+    if (f.type === 'rug'){
+      const pl = new THREE.Mesh(new THREE.PlaneGeometry(x1-x0,z1-z0), new THREE.MeshStandardMaterial({color, roughness:1}));
+      pl.rotation.x=-Math.PI/2; pl.position.set((x0+x1)/2,0.01,(z0+z1)/2); world3.add(pl); continue;
+    }
+    const h = Math.max(f.h,0.08);
+    const m3 = box(x1-x0, h, z1-z0, color);
+    m3.position.set((x0+x1)/2, h/2, (z0+z1)/2);
+    if (f.type==='tv'){ m3.material.emissive = new THREE.Color(0x1a2a3a); m3.material.emissiveIntensity=0.6; window.__tv = m3; }
+    if (f.type==='dock'){ const glow = new THREE.PointLight(0x2ea043, 1.2, 2.2); glow.position.set((x0+x1)/2,0.5,(z0+z1)/2); world3.add(glow); dockGlow = glow; }
+    world3.add(m3);
+  }
+  // stove burner glow marker
+  const stove = m.appliances.stove.pos;
+  const burner = new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.22,0.04,20), new THREE.MeshStandardMaterial({color:0x552222, emissive:0x330000}));
+  burner.position.set(stove[0], 0.92, stove[2]); world3.add(burner); window.__burner = burner;
+  const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.17,0.22,16), new THREE.MeshStandardMaterial({color:0x8891a0, metalness:.7, roughness:.3}));
+  pot.position.set(stove[0], 1.05, stove[2]); pot.castShadow=true; world3.add(pot); window.__pot = pot;
+  const steam = new THREE.Group(); const sm = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0});
+  for(let i=0;i<4;i++){ const s=new THREE.Mesh(new THREE.SphereGeometry(0.05,6,6), sm); s.position.set((Math.random()-.5)*.15,0.2+i*0.1,(Math.random()-.5)*.15); steam.add(s);}
+  steam.position.set(stove[0],1.16,stove[2]); world3.add(steam); window.__steam = steam; window.__steamMat = sm;
+
+  // people
+  for (const [pid,p] of Object.entries(m.people)){
+    const g = new THREE.Group();
+    const bodyc = pid==='grandpa' ? 0x6b5742 : 0x3a6ea5;
+    const body = box(0.36,0.55,0.26, bodyc); body.position.y=0.78; g.add(body);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.14,16,16), new THREE.MeshStandardMaterial({color:0xe0b896}));
+    head.position.y=1.18; head.castShadow=true; g.add(head);
+    g.position.set(p.pos[0], 0, p.pos[2]);
+    const sp = label(m.people[pid].name, '#cfe3ff'); sp.position.set(0,1.55,0); g.add(sp);
+    world3.add(g);
+  }
+
+  // items
+  for (const [iid,it] of Object.entries(m.items)){
+    const geo = new THREE.SphereGeometry(0.07,10,10);
+    const mat = new THREE.MeshStandardMaterial({color:0xffb347, emissive:0x663300, emissiveIntensity:.3});
+    const mesh = new THREE.Mesh(geo,mat); mesh.castShadow=true;
+    world3.add(mesh); itemMeshes[iid]=mesh;
+  }
+
+  // robot
+  robotG = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.32,0.34,0.26,24),
+    new THREE.MeshStandardMaterial({color:0xffffff, roughness:.35, metalness:.25}));
+  base.position.y=0.16; base.castShadow=true; robotG.add(base);
+  const band = new THREE.Mesh(new THREE.TorusGeometry(0.335,0.02,8,24), new THREE.MeshStandardMaterial({color:0x58a6ff, emissive:0x1a4a7a, emissiveIntensity:.6}));
+  band.rotation.x=Math.PI/2; band.position.y=0.16; robotG.add(band);
+  const nose = box(0.1,0.06,0.06,0xff5555); nose.position.set(0.3,0.2,0); robotG.add(nose);
+  for (let i=0;i<4;i++){
+    const wh = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.05,14), new THREE.MeshStandardMaterial({color:0x222}));
+    wh.rotation.z = Math.PI/2;
+    wh.position.set(i<2?0.2:-0.2, 0.07, i%2?0.28:-0.28);
+    robotG.add(wh); wheelMeshes.push(wh);
+  }
+  mastG = new THREE.Group(); mastG.position.set(0,0.29,0);
+  const pole = box(0.03,0.001,0.03,0x888); pole.position.y=0; mastG.add(pole);
+  const cam = new THREE.Mesh(new THREE.SphereGeometry(0.05,12,12), new THREE.MeshStandardMaterial({color:0x111, emissive:0x1a2a3a}));
+  cam.position.y=0; mastG.add(cam);
+  robotG.add(mastG);
+  const tray0 = box(0.02,0.02,0.02,0x58a6ff,{transparent:true,opacity:0}); robotG.add(tray0);
+  carrySlots = [0,1].map(i=>{
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.055,10,10), new THREE.MeshStandardMaterial({color:0xffb347, emissive:0x663300}));
+    s.visible=false; s.position.set(-0.12, 0.33, i*0.14-0.07); robotG.add(s); return s;
+  });
+  robotG.castShadow = true; world3.add(robotG);
+
+  // path line
+  pathMat = new THREE.LineDashedMaterial({color:0x58a6ff, dashSize:0.14, gapSize:0.08, linewidth:2});
+  pathLine = new THREE.Line(new THREE.BufferGeometry(), pathMat); pathLine.computeLineDistances(); world3.add(pathLine);
+
+  speechSprite = label('', '#e6edf3'); speechSprite.visible=false; world3.add(speechSprite);
+
+  camera.position.set(W/2, 11, H+7);
+  controls.target.set(W/2, 0, H/2);
+  staticBuilt = true;
+}
+
+// simple orbit-ish controls (no extra lib): drag to rotate, wheel to zoom, right/shift-drag to pan
+const controls = {target:new THREE.Vector3(7,0,5), az:0.9, el:0.95, dist:16,
+  update(){
+    const t=this.target;
+    camera.position.set(t.x + this.dist*Math.cos(this.el)*Math.sin(this.az),
+                         t.y + this.dist*Math.sin(this.el),
+                         t.z + this.dist*Math.cos(this.el)*Math.cos(this.az));
+    camera.lookAt(t);
+  }};
+let dragging=false, lastX=0, lastY=0, panning=false;
+renderer.domElement.addEventListener('pointerdown', e=>{dragging=true; panning = e.button===2 || e.shiftKey; lastX=e.clientX; lastY=e.clientY;});
+window.addEventListener('pointerup', ()=>dragging=false);
+window.addEventListener('pointermove', e=>{
+  if(!dragging) return;
+  const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY;
+  if (panning){
+    const right = new THREE.Vector3(Math.cos(controls.az),0,-Math.sin(controls.az));
+    const fwd = new THREE.Vector3(Math.sin(controls.az),0,Math.cos(controls.az));
+    controls.target.addScaledVector(right, -dx*0.015).addScaledVector(fwd, dy*0.015);
+  } else {
+    controls.az -= dx*0.006; controls.el = Math.max(0.25, Math.min(1.45, controls.el - dy*0.006));
+  }
+});
+renderer.domElement.addEventListener('contextmenu', e=>e.preventDefault());
+renderer.domElement.addEventListener('wheel', e=>{ controls.dist = Math.max(3, Math.min(30, controls.dist + e.deltaY*0.01)); e.preventDefault(); }, {passive:false});
+
+// ---------------- polling + render ----------------
+let bubbleTimer=null, lastSpeechId=0, lastEvId=0;
+async function poll(){
+  try{
+    if (!staticBuilt){
+      const m = await fetch('/api/map').then(r=>r.json());
+      buildStatic(m);
+      resize();
+    }
+    const s = await fetch('/api/state').then(r=>r.json());
+    applyState(s);
+  }catch(e){ /* server not up yet */ }
+  setTimeout(poll, 150);
+}
+poll();
+
+function applyState(s){
+  const r = s.robot;
+  robotG.position.set(r.x, 0, r.z);
+  robotG.rotation.y = -r.th + Math.PI/2*0; robotG.rotation.y = -r.th;
+  mastG.position.y = 0.29 + r.mast*0.55;
+  const spin = (r.v!==0||r.w!==0) ? performance.now()*0.02 : 0;
+  wheelMeshes.forEach(w=>w.rotation.x = spin*(r.v>=0?1:-1));
+
+  $('#hRoom').textContent = r.room;
+  $('#hTask').textContent = r.task;
+  $('#hBat').textContent = Math.round(r.battery)+'%';
+  $('#hBatBar').style.width = Math.max(0,Math.min(100,r.battery))+'%';
+  $('#hBatBar').style.background = r.battery<20? 'var(--bad)' : r.battery<45? 'var(--warn)':'var(--ok)';
+  const carried = Object.entries(s.items).filter(([k,i])=>i.carried).map(([k])=>k);
+  $('#hCarry').textContent = carried.length? carried.join(', ').replaceAll('_',' ') : '—';
+  $('#camDot').classList.toggle('on', r.mast>0.9);
+  $('#camText').textContent = r.mast>0.9 ? `Camera up — ${r.activity}` : (r.mast>0.05?'Camera rising…':'Camera mast lowered');
+
+  // path
+  if (s.path && s.path.length>1){
+    const pts = s.path.map(p=>new THREE.Vector3(p[0],0.02,p[1]));
+    pathLine.geometry.setFromPoints(pts); pathLine.computeLineDistances(); pathLine.visible=true;
+  } else pathLine.visible=false;
+
+  // items
+  for (const [iid, it] of Object.entries(s.items)){
+    const mesh = itemMeshes[iid]; if(!mesh) continue;
+    if (it.carried){ mesh.visible=false; carrySlots[it.slot]?.visible !== undefined && (carrySlots[it.slot].visible=true); }
+    else { mesh.visible=true; mesh.position.set(it.pos[0], it.pos[1]+0.08, it.pos[2]); }
+  }
+  carrySlots.forEach((c,i)=> c.visible = carried.length>i);
+
+  // stove / milk visuals
+  if (window.__burner) window.__burner.material.emissive.setHex(s.stove_on?0xaa2200:0x220000);
+  if (window.__steamMat) window.__steamMat.opacity = s.milk_temp>75 ? Math.min(.55,(s.milk_temp-75)/25*0.55) : 0;
+  if (window.__steam) window.__steam.children.forEach((p,i)=>{ p.position.y = 0.2 + ((performance.now()/600 + i*0.3)%1)*0.5; });
+  if (window.__pot) window.__pot.material.emissive.setHex(s.milk_level==='boiling_over'?0xff2200:0x000000);
+
+  if (window.__tv) window.__tv.material.emissiveIntensity = s.tv_on?0.9:0.05;
+  if (window.__door) window.__door.rotation.y = s.door_open ? -Math.PI/2.1 : 0, window.__door.position.x = window.__door.userData.hinge - (s.door_open? -0.02:0.02);
+
+  if (dockGlow) dockGlow.intensity = r.docked ? 1.6 : 0.5;
+
+  // speech bubble (billboard in 3D + HUD text)
+  if (s.speech.id !== lastSpeechId && s.speech.text){
+    lastSpeechId = s.speech.id;
+    $('#bubble').textContent = '🤖 ' + s.speech.text;
+    $('#bubble').classList.add('show');
+    clearTimeout(bubbleTimer);
+    bubbleTimer = setTimeout(()=>$('#bubble').classList.remove('show'), 6000);
+  }
+
+  // event log
+  if (s.events && s.events.length){
+    const newest = s.events[s.events.length-1].id;
+    if (newest !== lastEvId){
+      lastEvId = newest;
+      const log = $('#log');
+      log.innerHTML = s.events.slice().reverse().map(e=>`<div class="ev ${e.kind}">${esc(e.text)}</div>`).join('');
+    }
+  }
+  // detections
+  const det = $('#det');
+  if (s.detections && s.detections.length){
+    det.innerHTML = s.detections.map(d=>`<div class="d">👁 ${esc(d.label)}</div>`).join('');
+  } else det.innerHTML = '<div class="d" style="color:#666">Nothing in camera view</div>';
+}
+function esc(t){ const d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
+
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+resize();
+animate();
+</script>
+</body>
+</html>

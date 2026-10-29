@@ -50,14 +50,14 @@ const uint8_t PIN_SERVO = 3;
 //   2. send R90,  measure real angle a     -> DEG_PER_SEC = DEG_PER_SEC * a / 90
 const uint8_t DRIVE_SPEED = 170;      // PWM 0-255 for straight driving
 const uint8_t TURN_SPEED  = 170;      // PWM 0-255 for spinning
-float CM_PER_SEC  = 30.0;             // measured at DRIVE_SPEED
-float DEG_PER_SEC = 120.0;            // measured at TURN_SPEED
+float CM_PER_SEC  = 76.500;             // measured at DRIVE_SPEED
+float DEG_PER_SEC = 160.000;            // measured at TURN_SPEED
 
 // Real motion = rate * time + offset (start-up lag makes it shorter, coasting
 // makes it longer). Run calibrate.py - it measures both and prints these.
 //   time = (requested - OFFSET) / RATE
-float MOVE_OFFSET_CM  = 0.0;          // extra cm travelled beyond rate*time
-float TURN_OFFSET_DEG = 0.0;          // extra degrees turned beyond rate*time
+float MOVE_OFFSET_CM  = -42.500;          // extra cm travelled beyond rate*time
+float TURN_OFFSET_DEG = -30.000;          // extra degrees turned beyond rate*time
 
 // After every motion: brake, then wait for the car to stop rocking, BEFORE
 // replying DONE. Without this, chained turns add up the previous coast.
