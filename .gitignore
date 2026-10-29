@@ -16,3 +16,7 @@ robot-app/src-tauri/gen/android/build/
 robot-app/src-tauri/gen/android/app/build/
 robot-app/src-tauri/gen/android/local.properties
 robot-app/.env.local
+
+# report-diagrams (scratch python-diagrams env + generated images)
+report-diagrams/.venv/
+report-diagrams/*.png
